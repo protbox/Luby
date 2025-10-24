@@ -12,9 +12,9 @@ mkdir -p "$INSTALL_DIR"
 
 # Download files
 echo "Downloading files..."
-curl -fsSL "$BASE_URL/luby.lua" -o "$INSTALL_DIR/luby.lua"
-curl -fsSL "$BASE_URL/llfs.lua" -o "$INSTALL_DIR/llfs.lua"
-curl -fsSL "$BASE_URL/lulpeg.lua" -o "$INSTALL_DIR/lulpeg.lua"
+curl -fsSL $BASE_URL/luby.lua -o "$INSTALL_DIR/luby.lua"
+curl -fsSL $BASE_URL/llfs.lua -o "$INSTALL_DIR/llfs.lua"
+curl -fsSL $BASE_URL/lulpeg.lua -o "$INSTALL_DIR/lulpeg.lua"
 
 # Make main script executable
 chmod +x "$INSTALL_DIR/luby.lua"

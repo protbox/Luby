@@ -1,3 +1,5 @@
+#!/usr/bin/luajit
+
 --[[
 Luby - A Ruby-esque language that transpiles to Lua
 Not a lot/any error checking currently, so it will just convert anything 
