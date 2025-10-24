@@ -1,9 +1,0 @@
-[submodule "deps/luajit/src"]
-	path = deps/luajit/src
-	url = https://luajit.org/git/luajit.git
-[submodule "deps/luafilesystem"]
-	path = deps/luafilesystem
-	url = https://github.com/lunarmodules/luafilesystem.git
-[submodule "deps/lulpeg"]
-	path = deps/lulpeg
-	url = https://github.com/pygy/LuLPeg.git
