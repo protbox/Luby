@@ -885,7 +885,7 @@ function transpile(source)
 end
 
 -- lfs is necessary for cross-platform file/directory operations
-local lfs = require("src.llfs")
+local lfs = require("llfs")
 local SOURCE_EXT = ".rb"  -- file extension to look for
 
 -- get all files recursively from directory
