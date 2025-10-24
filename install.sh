@@ -3,7 +3,7 @@ set -e
 
 INSTALL_DIR="/usr/local/luby"
 BIN_LINK="/usr/local/bin/luby"
-BASE_URL = "https://raw.githubusercontent.com/protbox/Luby/refs/heads/main"
+BASE_URL = "https://github.com/protbox/Luby/raw/refs/heads/main"
 
 echo "Installing Luby..."
 
