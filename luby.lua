@@ -8,13 +8,16 @@ Pass it a folder to recursively transpile all *.rb files to the current working 
 - poltergasm
 ]]
 
+local script_path = debug.getinfo(1, "S").source:match("^@(.*/)")
+package.path = script_path .. "?.lua;" .. package.path
+
 -- try to load lpeg, fall back to lulpeg if not available
 local lpeg
 local ok, mod = pcall(require, "lpeg")
 if ok then
     lpeg = mod
 else
-    lpeg = require("../deps/lulpeg/lulpeg")
+    lpeg = require("lulpeg")
 end
 
 local P, R, S, V, C, Ct, Cc, Cg = 
@@ -880,28 +883,20 @@ function transpile(source)
 end
 
 -- lfs is necessary for cross-platform file/directory operations
-local lfs = require("lfs")
+local lfs = require("src.llfs")
 local SOURCE_EXT = ".rb"  -- file extension to look for
-
--- check if path is a directory
-local function is_directory(path)
-    local attr = lfs.attributes(path)
-    return attr and attr.mode == "directory"
-end
 
 -- get all files recursively from directory
 local function get_files_recursive(dir, files)
     files = files or {}
-    for entry in lfs.dir(dir) do
+    local f = lfs.dir(dir)
+    for _,entry in ipairs(f) do
         if entry ~= "." and entry ~= ".." then
             local filepath = dir .. "/" .. entry
-            local attr = lfs.attributes(filepath)
-            if attr then
-                if attr.mode == "directory" then
-                    get_files_recursive(filepath, files)
-                elseif attr.mode == "file" and filepath:match(SOURCE_EXT .. "$") then
-                    table.insert(files, filepath)
-                end
+            if lfs.is_dir(filepath) then
+                get_files_recursive(filepath, files)
+            elseif filepath:match(SOURCE_EXT .. "$") then
+                table.insert(files, filepath)
             end
         end
     end
@@ -933,8 +928,7 @@ local function ensure_directory(filepath)
     local path = ""
     for _, part in ipairs(parts) do
         path = path == "" and part or (path .. "/" .. part)
-        local attr = lfs.attributes(path)
-        if not attr then
+        if not lfs.path_exists(path) then
             lfs.mkdir(path)
         end
     end
@@ -952,7 +946,7 @@ end
 local source_path = arg[1]
 local run = arg[2]
 
-if is_directory(source_path) then
+if lfs.is_dir(source_path) then
     -- directory mode: recursively transpile all files
     local files = get_files_recursive(source_path)
     
