@@ -2,7 +2,7 @@
 
 ## Installation
 ```bash
-curl -fsSL https://github.com/protbox/Luby/raw/refs/heads/main/install.sh | sudo bash
+curl -fsSL https://github.com/protbox/Luby/raw/refs/heads/main/install.sh | sudo sh
 ```
 
 ## Usage
