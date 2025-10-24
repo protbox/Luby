@@ -10,8 +10,7 @@ Pass it a folder to recursively transpile all *.rb files to the current working 
 - poltergasm
 ]]
 
-local script_path = debug.getinfo(1, "S").source:match("^@(.*/)")
-package.path = script_path .. "?.lua;" .. package.path
+package.path = "/usr/local/luby/?.lua;" .. package.path
 
 -- try to load lpeg, fall back to lulpeg if not available
 local lpeg
