@@ -1,4 +1,4 @@
-#!/usr/bin/luajit
+#!/usr/bin/env luajit
 
 --[[
 Luby - A Ruby-esque language that transpiles to Lua
