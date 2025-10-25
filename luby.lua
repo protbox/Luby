@@ -2,7 +2,7 @@
 
 --[[
 Luby - A Ruby-esque language that transpiles to Lua
-Not a lot/any error checking currently, so it will just convert anything 
+Now has basic error checking, but you should still be alert. It's not perfect.
 you write, but parsing is pretty solid at least.
 Pass this script a filename to print the transpiled code to stdout
 Pass it a folder to recursively transpile all *.rb files to the current working directory 
@@ -68,6 +68,7 @@ local grammar = P{
                  V("unary_op_stmt") +
                  V("puts_stmt") +
                  V("return_stmt") +
+                 V("assignment_stmt") +
                  V("other_stmt")) * skip,
     
     -- let statement: let var = value or let x, y = val1, val2
@@ -219,6 +220,17 @@ local grammar = P{
     -- return values (similar to let_values, try structured then raw)
     return_value = V("lambda_expr") + V("hash_table") + V("array_table") + V("interpolated_string") + C((1 - S("\n#"))^1),
     
+    -- assignment: var = value or array[index] = value or table.field = value
+    -- This catches assignments with lambda expressions that other_stmt would miss
+    assignment_stmt = Ct(
+        Cc("assignment") *
+        Cg(C((1 - S("=\n#"))^1 * P("=") * ws0), "target") *
+        Cg(V("assignment_value"), "value")
+    ),
+    
+    -- values that can be assigned (structured values that need parsing)
+    assignment_value = V("lambda_expr") + V("hash_table") + V("array_table") + V("interpolated_string") + C((1 - S("\n#"))^1),
+    
     -- other Lua code (pass through) - only matches plain Lua statements  
     -- don't match lines that start with block-ending keywords!
     other_stmt = -((P("end") + P("when") + P("elsif") + P("else")) * (ws + -P(1))) * Ct(
@@ -256,13 +268,12 @@ local grammar = P{
         P(":") * Cg(identifier, "key") * ws0 * P("=>") * ws0 * Cg(V("value_expr"), "value")
     ),
     
-    -- array: { item, ... }
-    -- TODO: potentially change this to [] to differentiate it from hashes
+    -- array: [ item, ... ] or { item, ... } (backwards compatible)
     array_table = Ct(
         Cc("array") *
-        P("{") * ws0 *
+        (P("[") + P("{")) * ws0 *
         Cg(Ct((V("value_expr") * ws0 * (P(",") * ws0 * V("value_expr") * ws0)^0)^-1), "items") *
-        P("}")
+        (P("]") + P("}"))
     ),
     
     -- complex expressions (for conditions) - captures until newline, 'then', 'do', or comment
@@ -442,6 +453,8 @@ function CodeGen:gen_node(node)
         self:gen_puts(node)
     elseif ntype == "return" then
         self:gen_return(node)
+    elseif ntype == "assignment" then
+        self:gen_assignment(node)
     elseif ntype == "lua" then
         local code = self:convert_interpolated_strings(node.code)
         code = self:convert_instance_vars(code)
@@ -665,6 +678,23 @@ function CodeGen:gen_return(node)
     end
 end
 
+function CodeGen:gen_assignment(node)
+    local target = node.target
+    local value
+    
+    -- Handle structured values (lambda, hash, array)
+    if type(node.value) == "table" then
+        value = self:gen_expr(node.value)
+    else
+        value = self:convert_instance_vars(tostring(node.value))
+    end
+    
+    -- Convert instance variables in target
+    target = self:convert_instance_vars(target)
+    
+    self:emit_line(target .. value)
+end
+
 function CodeGen:gen_expr(expr)
     if type(expr) ~= "table" then
         -- check if it's a string value captured from grammar
@@ -872,7 +902,223 @@ end
 
 -- TRANSPILING
 
+-- ERROR CHECKING
+
+local ErrorChecker = {}
+ErrorChecker.__index = ErrorChecker
+
+function ErrorChecker:new()
+    local obj = {
+        errors = {},
+        state = {
+            in_case = false,
+            in_class = false,
+            in_class_method = false,
+            block_stack = {}  -- track blocks with {type, line_num}
+        }
+    }
+    setmetatable(obj, self)
+    return obj
+end
+
+function ErrorChecker:add_error(line_num, message)
+    table.insert(self.errors, {line = line_num, msg = message})
+end
+
+function ErrorChecker:push_block(block_type, line_num)
+    table.insert(self.state.block_stack, {type = block_type, line = line_num})
+end
+
+function ErrorChecker:pop_block(expected_type, line_num)
+    if #self.state.block_stack == 0 then
+        self:add_error(line_num, "Unexpected 'end' - no matching block to close")
+        return false
+    end
+    
+    local block = table.remove(self.state.block_stack)
+    if expected_type and block.type ~= expected_type then
+        self:add_error(line_num, 
+            string.format("Mismatched 'end' - expected to close '%s' from line %d, but context suggests '%s'",
+                block.type, block.line, expected_type))
+        return false
+    end
+    
+    return true
+end
+
+function ErrorChecker:check_line(line, line_num)
+    -- First check if this is a full-line comment (starts with #)
+    local trimmed_full = line:match("^%s*(.-)%s*$")
+    if trimmed_full:match("^#") then
+        return  -- Skip full-line comments
+    end
+    
+    -- For non-comment lines, remove inline comments (everything after #)
+    local code_part = line:match("^([^#]-)%s*#") or line
+    local trimmed = code_part:match("^%s*(.-)%s*$")
+    
+    -- Skip empty lines
+    if trimmed == "" then
+        return
+    end
+    
+    -- Check for 'when' without 'case'
+    if trimmed:match("^when%s+") then
+        if not self.state.in_case then
+            self:add_error(line_num, "Used 'when' outside of a 'case' statement")
+        end
+    end
+    
+    -- Check for 'else' without proper context
+    if trimmed:match("^else%s*$") or trimmed:match("^else%s*#") then
+        if not self.state.in_case and #self.state.block_stack > 0 then
+            local top = self.state.block_stack[#self.state.block_stack]
+            if top.type ~= "if" and top.type ~= "elsif" then
+                self:add_error(line_num, "Used 'else' outside of 'if' or 'case' statement")
+            end
+        elseif #self.state.block_stack == 0 then
+            self:add_error(line_num, "Used 'else' outside of any control structure")
+        end
+    end
+    
+    -- Check for 'super' outside class method
+    if trimmed:match("super%s*%(") then
+        if not self.state.in_class_method then
+            self:add_error(line_num, "Used 'super' outside of a class method")
+        end
+    end
+    
+    -- Check for instance variables outside class
+    local instance_var = trimmed:match("@([%w_]+)")
+    if instance_var then
+        -- Allow @super and @__name as special cases
+        if instance_var ~= "super" and instance_var ~= "__name" then
+            if not self.state.in_class then
+                self:add_error(line_num, 
+                    string.format("Used instance variable '@%s' outside of a class", instance_var))
+            end
+        end
+    end
+    
+    -- Check for malformed hash table syntax (key => value without :)
+    -- Look for "word =>" pattern where word is NOT preceded by :
+    if trimmed:match("=>") then
+        -- Check if there's a bare word (not preceded by :) before =>
+        local before_arrow = trimmed:match("([^,{]+)%s*=>")
+        if before_arrow then
+            -- Check if this segment has a word but no leading colon
+            if before_arrow:match("%w") and not before_arrow:match(":") then
+                self:add_error(line_num, 
+                    "Invalid hash table syntax - keys must be symbols (use ':key => value', not 'key => value')")
+            end
+        end
+    end
+    
+    -- Check for :key = instead of :key =>
+    if trimmed:match(":%s*%w+%s*=") and not trimmed:match(":%s*%w+%s*=>") then
+        self:add_error(line_num,
+            "Invalid hash table syntax - use '=>' for hash pairs (not '=')")
+    end
+    
+    -- Track block starts
+    if trimmed:match("^case%s+") then
+        self.state.in_case = true
+        self:push_block("case", line_num)
+    elseif trimmed:match("^if%s+") then
+        self:push_block("if", line_num)
+    elseif trimmed:match("^elsif%s+") then
+        -- Replace 'if' with 'elsif' on stack
+        if #self.state.block_stack > 0 and self.state.block_stack[#self.state.block_stack].type == "if" then
+            self.state.block_stack[#self.state.block_stack].type = "elsif"
+        end
+    elseif trimmed:match("^while%s+") then
+        self:push_block("while", line_num)
+    elseif trimmed:match("^class%s+") then
+        self.state.in_class = true
+        self:push_block("class", line_num)
+    elseif trimmed:match("^def%s+") then
+        if self.state.in_class then
+            self.state.in_class_method = true
+            self:push_block("class_method", line_num)
+        else
+            self:push_block("def", line_num)
+        end
+    elseif trimmed:match("lambda%s+do") then
+        self:push_block("lambda", line_num)
+    elseif trimmed:match("%.each_pair%s+do") then
+        self:push_block("each_pair", line_num)
+    elseif trimmed:match("%.each%s+do") then
+        self:push_block("each", line_num)
+    end
+    
+    -- Track block ends
+    if trimmed:match("^end%s*$") or trimmed:match("^end%s*#") then
+        if #self.state.block_stack > 0 then
+            local block = self.state.block_stack[#self.state.block_stack]
+            
+            -- Update state when closing blocks
+            if block.type == "case" then
+                self.state.in_case = false
+            elseif block.type == "class" then
+                self.state.in_class = false
+                self.state.in_class_method = false
+            elseif block.type == "class_method" then
+                self.state.in_class_method = false
+            end
+            
+            self:pop_block(nil, line_num)
+        else
+            self:add_error(line_num, "Unexpected 'end' - no matching block to close")
+        end
+    end
+end
+
+function ErrorChecker:check_source(source)
+    local line_num = 1
+    -- Split source into lines properly
+    for line in (source .. "\n"):gmatch("([^\n]*)\n") do
+        self:check_line(line, line_num)
+        line_num = line_num + 1
+    end
+    
+    -- Check for unclosed blocks
+    if #self.state.block_stack > 0 then
+        for _, block in ipairs(self.state.block_stack) do
+            self:add_error(block.line, 
+                string.format("Unclosed '%s' block - missing 'end'", block.type))
+        end
+    end
+    
+    return #self.errors == 0
+end
+
+function ErrorChecker:get_error_report()
+    if #self.errors == 0 then
+        return nil
+    end
+    
+    -- Sort errors by line number
+    table.sort(self.errors, function(a, b) return a.line < b.line end)
+    
+    local report = {"Luby syntax errors found:\n"}
+    for _, err in ipairs(self.errors) do
+        table.insert(report, string.format("  Line %d: %s", err.line, err.msg))
+    end
+    
+    return table.concat(report, "\n")
+end
+
 function transpile(source)
+    -- Error checking
+    local checker = ErrorChecker:new()
+    local valid = checker:check_source(source)
+    
+    if not valid then
+        local error_report = checker:get_error_report()
+        error(error_report)
+    end
+    
+    -- Original transpilation
     local ast = grammar:match(source)
     
     if not ast then
@@ -883,7 +1129,7 @@ function transpile(source)
     return codegen:generate(ast)
 end
 
--- lfs is necessary for cross-platform file/directory operations
+-- my super sketch "lfs" implementation
 local lfs = require("llfs")
 local SOURCE_EXT = ".rb"  -- file extension to look for
 
