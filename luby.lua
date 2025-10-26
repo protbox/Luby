@@ -3,7 +3,6 @@
 --[[
 Luby - A Ruby-esque language that transpiles to Lua
 Now has basic error checking, but you should still be alert. It's not perfect.
-you write, but parsing is pretty solid at least.
 Pass this script a filename to print the transpiled code to stdout
 Pass it a folder to recursively transpile all *.rb files to the current working directory 
 (the folder structures will remain in tact)
@@ -157,7 +156,7 @@ local grammar = P{
     -- each_pair: target.each_pair do |k, v| ... end
     each_pair_stmt = Ct(
         Cc("each_pair") *
-        Cg(identifier, "target") * ws0 * P(".each_pair") * skip *
+        Cg(C((1 - (ws0 * P(".each_pair")) - P("\n"))^1), "target") * ws0 * P(".each_pair") * skip *
         P("do") * skip * P("|") * ws0 *
         Cg(identifier, "key") * ws0 * P(",") * ws0 * Cg(identifier, "value") * ws0 * P("|") * skip *
         Cg(Ct(V("statement")^0), "body") *
@@ -167,7 +166,7 @@ local grammar = P{
     -- each: target.each do |i, v| ... end
     each_stmt = Ct(
         Cc("each") *
-        Cg(identifier, "target") * ws0 * P(".each") * skip *
+        Cg(C((1 - (ws0 * P(".each")) - P("\n"))^1), "target") * ws0 * P(".each") * skip *
         P("do") * skip * P("|") * ws0 *
         Cg(identifier, "index") * ws0 * P(",") * ws0 * Cg(identifier, "value") * ws0 * P("|") * skip *
         Cg(Ct(V("statement")^0), "body") *
@@ -186,7 +185,7 @@ local grammar = P{
     instance_var_assign = Ct(
         Cc("instance_var_assign") *
         P("@") * Cg(C(P("super") + P("__name") + identifier), "var") * ws0 *
-        P("=") * ws0 * Cg(C((1 - S("\n#"))^1), "value")
+        P("=") * ws0 * Cg(V("assignment_value"), "value")
     ),
     
     -- super(self)
@@ -240,11 +239,18 @@ local grammar = P{
     
     -- value expressions
     value_expr = V("lambda_expr") + V("hash_table") + V("array_table") + V("interpolated_string") + 
-                 V("operator_expr") + V("simple_expr"),
+                 V("operator_expr") + V("backslash_call") + V("simple_expr"),
     
     -- expression containing operators (captured as raw Lua)
     -- lookahead: some non-operator chars, then an operator, then anything
     operator_expr = #((1 - S("\n#+-*/<>="))^1 * S("+-*/<>=")) * C((1 - S("\n#"))^1),
+    
+    -- backslash method call: \method(args) -> self:method(args)
+    backslash_call = Ct(
+        Cc("backslash_call") *
+        P("\\") * Cg(identifier, "method") * ws0 *
+        P("(") * ws0 * Cg(C((1 - P(")"))^0), "args") * P(")")
+    ),
     
     -- lambda: lambda do |params| ... end
     lambda_expr = Ct(
@@ -259,20 +265,20 @@ local grammar = P{
     -- hash: { :key => value, ... }
     hash_table = Ct(
         Cc("hash") *
-        P("{") * ws0 *
-        Cg(Ct((V("hash_pair") * ws0 * (P(",") * ws0 * V("hash_pair") * ws0)^0)^-1), "pairs") *
+        P("{") * skip *
+        Cg(Ct((V("hash_pair") * skip * (P(",") * skip * V("hash_pair") * skip)^0)^-1), "pairs") *
         P("}")
     ),
     
     hash_pair = Ct(
-        P(":") * Cg(identifier, "key") * ws0 * P("=>") * ws0 * Cg(V("value_expr"), "value")
+        P(":") * Cg(identifier, "key") * skip * P("=>") * skip * Cg(V("value_expr"), "value")
     ),
     
     -- array: [ item, ... ] or { item, ... } (backwards compatible)
     array_table = Ct(
         Cc("array") *
-        (P("[") + P("{")) * ws0 *
-        Cg(Ct((V("value_expr") * ws0 * (P(",") * ws0 * V("value_expr") * ws0)^0)^-1), "items") *
+        (P("[") + P("{")) * skip *
+        Cg(Ct((V("value_expr") * skip * (P(",") * skip * V("value_expr") * skip)^0)^-1), "items") *
         (P("]") + P("}"))
     ),
     
@@ -632,9 +638,17 @@ end
 
 function CodeGen:gen_instance_var_assign(node)
     local var_name = "self." .. node.var
-    -- strip any leading/trailing whitespace from value and convert instance vars
-    local value = node.value:match("^%s*(.-)%s*$")
-    value = self:convert_instance_vars(value)
+    local value
+    
+    -- Handle structured values (lambda, hash, array)
+    if type(node.value) == "table" then
+        value = self:gen_expr(node.value)
+    else
+        -- strip any leading/trailing whitespace from value and convert instance vars
+        value = node.value:match("^%s*(.-)%s*$")
+        value = self:convert_instance_vars(value)
+    end
+    
     self:emit_line(var_name .. " = " .. value)
 end
 
@@ -724,6 +738,10 @@ function CodeGen:gen_expr(expr)
         else
             return "self." .. expr.name
         end
+    elseif etype == "backslash_call" then
+        -- \method(args) -> self:method(args)
+        local args = self:convert_instance_vars(expr.args)
+        return "self:" .. expr.method .. "(" .. args .. ")"
     elseif etype == "super" then
         -- super(self) - use current class and method context
         if self.current_class and self.current_method then
@@ -812,6 +830,11 @@ function CodeGen:convert_instance_vars(expr)
     -- FIXME:
     -- thinking about it, I don't think __name and @super need to be 
     -- handled specially. It should just resolve as long as @var -> self.var
+    
+    -- First convert \method to self:method
+    expr = expr:gsub("\\([%w_]+)", "self:%1")
+    
+    -- Then convert @variable to self.variable
     return expr:gsub("@(__name)", "self.%1")
                :gsub("@(super)", "self.%1")
                :gsub("@([%w_]+)", "self.%1")
@@ -1131,7 +1154,7 @@ end
 
 -- my super sketch "lfs" implementation
 local lfs = require("llfs")
-local SOURCE_EXT = ".rb"  -- file extension to look for
+local SOURCE_EXT = ".rb"  -- using rb for now as it plays nicely with syntax highlighting
 
 -- get all files recursively from directory
 local function get_files_recursive(dir, files)
