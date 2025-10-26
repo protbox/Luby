@@ -163,12 +163,17 @@ local grammar = P{
         P("end")
     ),
     
-    -- each: target.each do |i, v| ... end
+    -- each: target.each do |i, v| ... end OR target.each do |v| ... end
     each_stmt = Ct(
         Cc("each") *
         Cg(C((1 - (ws0 * P(".each")) - P("\n"))^1), "target") * ws0 * P(".each") * skip *
         P("do") * skip * P("|") * ws0 *
-        Cg(identifier, "index") * ws0 * P(",") * ws0 * Cg(identifier, "value") * ws0 * P("|") * skip *
+        (
+            -- Two parameters: |index, value|
+            (Cg(identifier, "index") * ws0 * P(",") * ws0 * Cg(identifier, "value")) +
+            -- One parameter: |value| (index will be nil)
+            (Cg(identifier, "value"))
+        ) * ws0 * P("|") * skip *
         Cg(Ct(V("statement")^0), "body") *
         P("end")
     ),
@@ -627,7 +632,8 @@ function CodeGen:gen_each_pair(node)
 end
 
 function CodeGen:gen_each(node)
-    self:emit_line("for " .. node.index .. ", " .. node.value .. " in ipairs(" .. node.target .. ") do")
+    local index = node.index or "_"
+    self:emit_line("for " .. index .. ", " .. node.value .. " in ipairs(" .. node.target .. ") do")
     self:inc_indent()
     for _, stmt in ipairs(node.body) do
         self:gen_node(stmt)

@@ -24,9 +24,13 @@ let people = [
     }
 ]
 
-people.each do |_, person|
-    puts "#{person.name}: Section #{person.sector}"
+people.each do |person| # if you omit the index it translates to _, person
+    puts "#{person.name}: Sector #{person.sector}"
     if person.check
         puts "#{person.check()}"
     end
+end
+
+people[1].each_pair do |k,v|
+    puts "#{k} => #{v}"
 end
