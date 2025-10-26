@@ -193,10 +193,10 @@ local grammar = P{
         P("=") * ws0 * Cg(V("assignment_value"), "value")
     ),
     
-    -- super(self)
+    -- super(args)
     super_stmt = Ct(
         Cc("super_stmt") *
-        P("super") * P("(") * ws0 * Cg(C(P("self")), "arg") * ws0 * P(")")
+        P("super") * P("(") * ws0 * Cg(C((1 - P(")"))^0), "args") * ws0 * P(")")
     ),
     
     -- unary operators: x += 1 or @x += 1
@@ -327,10 +327,10 @@ local grammar = P{
         P("@") * Cg(C(P("super") + P("__name") + identifier), "name")
     ),
     
-    -- super(self)
+    -- super(args)
     super_call = Ct(
         Cc("super") *
-        P("super") * P("(") * ws0 * Cg(C(P("self")), "arg") * ws0 * P(")")
+        P("super") * P("(") * ws0 * Cg(C((1 - P(")"))^0), "args") * ws0 * P(")")
     ),
     
     -- obj.method(args) or obj:method(args)
@@ -660,7 +660,7 @@ end
 
 function CodeGen:gen_super_stmt(node)
     if self.current_class and self.current_method then
-        self:emit_line(self.current_class .. ".super." .. self.current_method .. "(" .. node.arg .. ")")
+        self:emit_line(self.current_class .. ".super." .. self.current_method .. "(" .. node.args .. ")")
     else
         error("super() called outside of class method")
     end
@@ -749,9 +749,9 @@ function CodeGen:gen_expr(expr)
         local args = self:convert_instance_vars(expr.args)
         return "self:" .. expr.method .. "(" .. args .. ")"
     elseif etype == "super" then
-        -- super(self) - use current class and method context
+        -- super(args) - use current class and method context
         if self.current_class and self.current_method then
-            return self.current_class .. ".super." .. self.current_method .. "(" .. expr.arg .. ")"
+            return self.current_class .. ".super." .. self.current_method .. "(" .. expr.args .. ")"
         else
             error("super() called outside of class method")
         end
