@@ -27,8 +27,8 @@ local P, R, S, V, C, Ct, Cc, Cg =
 
 local ws = S(" \t\n\r")^1  -- at least one whitespace
 local ws0 = S(" \t\n\r")^0  -- zero or more whitespace
-local comment = P("#") * (1 - P("\n"))^0
-local skip = (ws + comment)^0
+-- Don't consume comments in skip - handle them separately
+local skip = ws^0
 
 -- Identifiers
 local alpha = R("az", "AZ") + P("_")
@@ -42,6 +42,10 @@ local number = C(R("09")^1 * (P(".") * R("09")^1)^-1)
 local escape = P("\\") * P(1)
 local string_sq = Ct(Cc("string") * Cg(C(P("'") * (escape + (1 - S("'\\")))^0 * P("'")), "value"))
 local string_dq_literal = Ct(Cc("string") * Cg(C(P('"') * (escape + (1 - S('"\\')))^0 * P('"')), "value"))
+
+-- Pattern for matching strings (for ternary parsing)
+local any_string = (P('"') * (escape + (1 - S('"\\')))^0 * P('"')) + 
+                   (P("'") * (escape + (1 - S("'\\")))^0 * P("'"))
 
 -- Literals
 local bool_lit = C(P("true") + P("false"))
@@ -60,6 +64,7 @@ local grammar = P{
                  V("case_stmt") +
                  V("if_stmt") +
                  V("while_stmt") +
+                 V("for_in_stmt") +
                  V("each_pair_stmt") +
                  V("each_stmt") +
                  V("instance_var_assign") +
@@ -67,6 +72,7 @@ local grammar = P{
                  V("unary_op_stmt") +
                  V("puts_stmt") +
                  V("return_stmt") +
+                 V("ternary_stmt") +
                  V("assignment_stmt") +
                  V("other_stmt")) * skip,
     
@@ -80,7 +86,7 @@ local grammar = P{
     ),
     
     -- values for let (try structured patterns that need full parsing, but use raw for comma-separated)
-    let_values = V("lambda_expr") + V("hash_table") + V("array_table") + C((1 - S("\n#"))^1),
+    let_values = V("ternary_expr") + V("lambda_expr") + V("hash_table") + V("array_table") + C((1 - S("\n"))^1),
     
     -- class: class Name < Parent ... end
     class_def = Ct(
@@ -186,6 +192,15 @@ local grammar = P{
         P("end")
     ),
     
+    -- generic for loop: for vars in expr ... end (no 'do' required, like while)
+    for_in_stmt = Ct(
+        Cc("for_in") *
+        P("for") * ws * Cg(C((1 - P(" in "))^1), "vars") * ws * P("in") * ws *
+        Cg(C((1 - S("\n"))^1), "iterator") * skip *
+        Cg(Ct(V("statement")^0), "body") *
+        P("end")
+    ),
+    
     -- instance variable assignment: @var = value
     instance_var_assign = Ct(
         Cc("instance_var_assign") *
@@ -206,13 +221,13 @@ local grammar = P{
         (P("@") * Cg(Cc(true), "is_instance") * Cg(C(identifier), "var") + 
          Cg(Cc(false), "is_instance") * Cg(identifier, "var")) * ws0 *
         Cg(C(P("+=") + P("-=") + P("*=")), "op") * ws0 *
-        Cg(C((1 - S("\n#"))^1), "value")
+        Cg(C((1 - S("\n"))^1), "value")
     ),
     
-    -- puts: puts expr
+    -- puts: puts expr (just capture the rest of the line)
     puts_stmt = Ct(
         Cc("puts") *
-        P("puts") * ws * Cg(V("value_expr"), "arg")
+        P("puts") * ws * Cg(C((1 - S("\n"))^0), "arg")
     ),
     
     -- return: return expr
@@ -222,18 +237,35 @@ local grammar = P{
     ),
     
     -- return values (similar to let_values, try structured then raw)
-    return_value = V("lambda_expr") + V("hash_table") + V("array_table") + V("interpolated_string") + C((1 - S("\n#"))^1),
+    return_value = V("ternary_expr") + V("lambda_expr") + V("hash_table") + V("array_table") + V("interpolated_string") + C((1 - S("\n"))^1),
+    
+    -- ternary statement (standalone): expr ? if_true : if_false
+    -- Match strings or non-delimiter chars to handle : inside strings
+    ternary_stmt = Ct(
+        Cc("ternary") *
+        Cg(C((any_string + (1 - S("?\n")))^1), "condition") * ws0 * P("?") * ws0 *
+        Cg(C((any_string + (1 - S(":\n")))^1), "if_true") * ws0 * P(":") * ws0 *
+        Cg(C((1 - S("\n"))^1), "if_false")
+    ),
+    
+    -- ternary operator: expr ? if_true : if_false (for use in expressions)
+    ternary_expr = Ct(
+        Cc("ternary") *
+        Cg(C((any_string + (1 - S("?\n")))^1), "condition") * ws0 * P("?") * ws0 *
+        Cg(C((any_string + (1 - S(":\n")))^1), "if_true") * ws0 * P(":") * ws0 *
+        Cg(C((1 - S("\n"))^1), "if_false")
+    ),
     
     -- assignment: var = value or array[index] = value or table.field = value
     -- This catches assignments with lambda expressions that other_stmt would miss
     assignment_stmt = Ct(
         Cc("assignment") *
-        Cg(C((1 - S("=\n#"))^1 * P("=") * ws0), "target") *
+        Cg(C((1 - S("=\n"))^1 * P("=") * ws0), "target") *
         Cg(V("assignment_value"), "value")
     ),
     
     -- values that can be assigned (structured values that need parsing)
-    assignment_value = V("lambda_expr") + V("hash_table") + V("array_table") + V("interpolated_string") + C((1 - S("\n#"))^1),
+    assignment_value = V("ternary_expr") + V("lambda_expr") + V("hash_table") + V("array_table") + V("interpolated_string") + C((1 - S("\n"))^1),
     
     -- other Lua code (pass through) - only matches plain Lua statements  
     -- don't match lines that start with block-ending keywords!
@@ -248,7 +280,7 @@ local grammar = P{
     
     -- expression containing operators (captured as raw Lua)
     -- lookahead: some non-operator chars, then an operator, then anything
-    operator_expr = #((1 - S("\n#+-*/<>="))^1 * S("+-*/<>=")) * C((1 - S("\n#"))^1),
+    operator_expr = #((1 - S("\n+-*/<>="))^1 * S("+-*/<>=")) * C((1 - S("\n"))^1),
     
     -- backslash method call: \method(args) -> self:method(args)
     backslash_call = Ct(
@@ -287,8 +319,8 @@ local grammar = P{
         (P("]") + P("}"))
     ),
     
-    -- complex expressions (for conditions) - captures until newline, 'then', 'do', or comment
-    complex_expr = V("interpolated_string") + C((1 - S("\n#") - P("then") - P("do"))^1),
+    -- complex expressions (for conditions) - captures until newline, 'then', or 'do'
+    complex_expr = V("interpolated_string") + C((1 - S("\n") - P("then") - P("do"))^1),
     
     -- simple expressions  
     simple_expr = V("interpolated_string") +
@@ -419,6 +451,10 @@ function CodeGen:emit_class_boilerplate()
 end
 
 function CodeGen:generate(ast)
+    -- Always emit puts alias (puts -> print)
+    self:emit_line("local puts = print")
+    self:emit_line("")
+    
     -- first pass: check if we have any classes
     for _, node in ipairs(ast) do
         if node[1] == "class" then
@@ -452,6 +488,8 @@ function CodeGen:gen_node(node)
         self:gen_each_pair(node)
     elseif ntype == "each" then
         self:gen_each(node)
+    elseif ntype == "for_in" then
+        self:gen_for_in(node)
     elseif ntype == "instance_var_assign" then
         self:gen_instance_var_assign(node)
     elseif ntype == "super_stmt" then
@@ -464,6 +502,8 @@ function CodeGen:gen_node(node)
         self:gen_puts(node)
     elseif ntype == "return" then
         self:gen_return(node)
+    elseif ntype == "ternary" then
+        self:gen_ternary(node)
     elseif ntype == "assignment" then
         self:gen_assignment(node)
     elseif ntype == "lua" then
@@ -642,6 +682,19 @@ function CodeGen:gen_each(node)
     self:emit_line("end")
 end
 
+function CodeGen:gen_for_in(node)
+    local vars = self:convert_instance_vars(node.vars)
+    local iterator = self:convert_instance_vars(node.iterator)
+    -- comments already stripped in preprocessing
+    self:emit_line("for " .. vars .. " in " .. iterator .. " do")
+    self:inc_indent()
+    for _, stmt in ipairs(node.body) do
+        self:gen_node(stmt)
+    end
+    self:dec_indent()
+    self:emit_line("end")
+end
+
 function CodeGen:gen_instance_var_assign(node)
     local var_name = "self." .. node.var
     local value
@@ -682,20 +735,93 @@ function CodeGen:gen_unary_op(node)
     
     local var_name = node.is_instance and ("self." .. node.var) or node.var
     local value = self:convert_instance_vars(node.value)
+    -- comments already stripped in preprocessing
     
     self:emit_line(var_name .. " = " .. var_name .. " " .. lua_op .. " " .. value)
 end
 
 function CodeGen:gen_puts(node)
-    self:emit_line("print(" .. self:gen_expr(node.arg) .. ")")
+    -- Convert interpolation and instance vars, then wrap in parens
+    local arg = self:convert_interpolated_strings(node.arg)
+    arg = self:convert_instance_vars(arg)
+    self:emit_line("puts(" .. arg .. ")")
 end
 
 function CodeGen:gen_return(node)
     if node.value then
-        self:emit_line("return " .. self:gen_expr(node.value))
+        local value
+        if type(node.value) == "table" then
+            value = self:gen_expr(node.value)
+        else
+            value = self:gen_expr(node.value)
+            -- comments already stripped in preprocessing
+        end
+        self:emit_line("return " .. value)
     else
         self:emit_line("return")
     end
+end
+
+function CodeGen:gen_ternary(node)
+    -- Ternary: expr ? if_true : if_false
+    -- Transpiles to: if expr then if_true else if_false end
+    
+    -- Convert interpolation first, then instance vars
+    local condition = self:convert_interpolated_strings(node.condition)
+    condition = self:convert_instance_vars(condition)
+    
+    local if_true = self:convert_interpolated_strings(node.if_true)
+    if_true = self:convert_instance_vars(if_true)
+    
+    local if_false = self:convert_interpolated_strings(node.if_false)
+    if_false = self:convert_instance_vars(if_false)
+    
+    -- Add parentheses to puts calls for consistency
+    if_true = self:wrap_puts_with_parens(if_true)
+    if_false = self:wrap_puts_with_parens(if_false)
+    
+    -- For standalone ternary statements, emit as multi-line if
+    self:emit_line("if " .. condition .. " then")
+    self:inc_indent()
+    self:emit_line(if_true)
+    self:dec_indent()
+    self:emit_line("else")
+    self:inc_indent()
+    self:emit_line(if_false)
+    self:dec_indent()
+    self:emit_line("end")
+end
+
+function CodeGen:wrap_puts_with_parens(code)
+    -- If code starts with 'puts ' and doesn't already have parens, add them
+    -- This ensures consistency in ternary operators
+    local trimmed = code:match("^%s*(.-)%s*$")
+    if trimmed:match("^puts%s+") and not trimmed:match("^puts%s*%(") then
+        -- Extract the argument after 'puts '
+        local arg = trimmed:match("^puts%s+(.+)$")
+        if arg then
+            return "puts(" .. arg .. ")"
+        end
+    end
+    return code
+end
+
+function CodeGen:gen_ternary_expr(node)
+    -- Ternary expression for use in assignments, returns, etc.
+    -- expr ? if_true : if_false -> (expr and if_true or if_false)
+    -- Note: This uses Lua's "and/or" idiom which works like a ternary
+    
+    -- Convert interpolation first, then instance vars
+    local condition = self:convert_interpolated_strings(node.condition)
+    condition = self:convert_instance_vars(condition)
+    
+    local if_true = self:convert_interpolated_strings(node.if_true)
+    if_true = self:convert_instance_vars(if_true)
+    
+    local if_false = self:convert_interpolated_strings(node.if_false)
+    if_false = self:convert_instance_vars(if_false)
+    
+    return "(" .. condition .. " and " .. if_true .. " or " .. if_false .. ")"
 end
 
 function CodeGen:gen_assignment(node)
@@ -707,6 +833,7 @@ function CodeGen:gen_assignment(node)
         value = self:gen_expr(node.value)
     else
         value = self:convert_instance_vars(tostring(node.value))
+            -- comments already stripped in preprocessing
     end
     
     -- Convert instance variables in target
@@ -721,6 +848,8 @@ function CodeGen:gen_expr(expr)
         local str = tostring(expr)
         -- convert instance variables in raw expressions
         str = self:convert_instance_vars(str)
+        -- convert comments in raw expressions
+        -- comments already stripped in preprocessing
         return str
     end
     
@@ -728,6 +857,8 @@ function CodeGen:gen_expr(expr)
     
     if etype == "string" then
         return expr.value
+    elseif etype == "ternary" then
+        return self:gen_ternary_expr(expr)
     elseif etype == "lambda" then
         return self:gen_lambda(expr)
     elseif etype == "hash" then
@@ -1062,6 +1193,8 @@ function ErrorChecker:check_line(line, line_num)
         end
     elseif trimmed:match("^while%s+") then
         self:push_block("while", line_num)
+    elseif trimmed:match("^for%s+") and trimmed:match("%s+in%s+") then
+        self:push_block("for_in", line_num)
     elseif trimmed:match("^class%s+") then
         self.state.in_class = true
         self:push_block("class", line_num)
@@ -1138,6 +1271,10 @@ function ErrorChecker:get_error_report()
 end
 
 function transpile(source)
+    -- Preprocessing: Strip all # comments before parsing
+    -- This is simpler and more reliable than trying to convert them
+    source = strip_comments(source)
+    
     -- Error checking
     local checker = ErrorChecker:new()
     local valid = checker:check_source(source)
@@ -1156,6 +1293,57 @@ function transpile(source)
     
     local codegen = CodeGen:new()
     return codegen:generate(ast)
+end
+
+function strip_comments(source)
+    local result = {}
+    local in_string = false
+    local string_char = nil
+    local in_interp = false
+    local i = 1
+    
+    while i <= #source do
+        local char = source:sub(i, i)
+        local next_char = source:sub(i+1, i+1)
+        
+        -- Track string boundaries
+        if (char == '"' or char == "'") and (i == 1 or source:sub(i-1, i-1) ~= "\\") then
+            if not in_string then
+                in_string = true
+                string_char = char
+            elseif char == string_char and not in_interp then
+                in_string = false
+                string_char = nil
+            end
+        end
+        
+        -- Track interpolation inside double-quoted strings
+        if in_string and string_char == '"' then
+            if char == '#' and next_char == '{' then
+                in_interp = true
+            elseif char == '}' and in_interp then
+                in_interp = false
+            end
+        end
+        
+        -- Remove comments outside of strings and interpolations
+        if char == '#' and not in_string and not in_interp then
+            -- Skip the rest of the line (the comment)
+            while i <= #source and source:sub(i, i) ~= '\n' do
+                i = i + 1
+            end
+            -- Keep the newline
+            if i <= #source then
+                table.insert(result, '\n')
+            end
+        else
+            table.insert(result, char)
+        end
+        
+        i = i + 1
+    end
+    
+    return table.concat(result)
 end
 
 -- my super sketch "lfs" implementation
