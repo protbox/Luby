@@ -239,21 +239,21 @@ local grammar = P{
     -- return values (similar to let_values, try structured then raw)
     return_value = V("ternary_expr") + V("lambda_expr") + V("hash_table") + V("array_table") + V("interpolated_string") + C((1 - S("\n"))^1),
     
-    -- ternary statement (standalone): expr ? if_true : if_false
+    -- ternary statement (standalone): expr ? if_true : if_false OR expr ? if_true
     -- Match strings or non-delimiter chars to handle : inside strings
     ternary_stmt = Ct(
         Cc("ternary") *
         Cg(C((any_string + (1 - S("?\n")))^1), "condition") * ws0 * P("?") * ws0 *
-        Cg(C((any_string + (1 - S(":\n")))^1), "if_true") * ws0 * P(":") * ws0 *
-        Cg(C((1 - S("\n"))^1), "if_false")
+        Cg(C((any_string + (1 - S(":\n")))^1), "if_true") * ws0 *
+        (P(":") * ws0 * Cg(C((1 - S("\n"))^1), "if_false"))^-1
     ),
     
-    -- ternary operator: expr ? if_true : if_false (for use in expressions)
+    -- ternary operator: expr ? if_true : if_false OR expr ? if_true (for use in expressions)
     ternary_expr = Ct(
         Cc("ternary") *
         Cg(C((any_string + (1 - S("?\n")))^1), "condition") * ws0 * P("?") * ws0 *
-        Cg(C((any_string + (1 - S(":\n")))^1), "if_true") * ws0 * P(":") * ws0 *
-        Cg(C((1 - S("\n"))^1), "if_false")
+        Cg(C((any_string + (1 - S(":\n")))^1), "if_true") * ws0 *
+        (P(":") * ws0 * Cg(C((1 - S("\n"))^1), "if_false"))^-1
     ),
     
     -- assignment: var = value or array[index] = value or table.field = value
@@ -763,32 +763,42 @@ function CodeGen:gen_return(node)
 end
 
 function CodeGen:gen_ternary(node)
-    -- Ternary: expr ? if_true : if_false
-    -- Transpiles to: if expr then if_true else if_false end
+    -- Ternary: expr ? if_true : if_false OR expr ? if_true
+    -- Transpiles to: if expr then if_true else if_false end OR if expr then if_true end
+    
+    -- Helper to trim whitespace
+    local function trim(s)
+        return s:match("^%s*(.-)%s*$")
+    end
     
     -- Convert interpolation first, then instance vars
-    local condition = self:convert_interpolated_strings(node.condition)
+    local condition = self:convert_interpolated_strings(trim(node.condition))
     condition = self:convert_instance_vars(condition)
     
-    local if_true = self:convert_interpolated_strings(node.if_true)
+    local if_true = self:convert_interpolated_strings(trim(node.if_true))
     if_true = self:convert_instance_vars(if_true)
-    
-    local if_false = self:convert_interpolated_strings(node.if_false)
-    if_false = self:convert_instance_vars(if_false)
     
     -- Add parentheses to puts calls for consistency
     if_true = self:wrap_puts_with_parens(if_true)
-    if_false = self:wrap_puts_with_parens(if_false)
     
     -- For standalone ternary statements, emit as multi-line if
     self:emit_line("if " .. condition .. " then")
     self:inc_indent()
     self:emit_line(if_true)
     self:dec_indent()
-    self:emit_line("else")
-    self:inc_indent()
-    self:emit_line(if_false)
-    self:dec_indent()
+    
+    -- Only emit else block if if_false exists
+    if node.if_false then
+        local if_false = self:convert_interpolated_strings(trim(node.if_false))
+        if_false = self:convert_instance_vars(if_false)
+        if_false = self:wrap_puts_with_parens(if_false)
+        
+        self:emit_line("else")
+        self:inc_indent()
+        self:emit_line(if_false)
+        self:dec_indent()
+    end
+    
     self:emit_line("end")
 end
 
@@ -809,17 +819,28 @@ end
 function CodeGen:gen_ternary_expr(node)
     -- Ternary expression for use in assignments, returns, etc.
     -- expr ? if_true : if_false -> (expr and if_true or if_false)
+    -- expr ? if_true -> (expr and if_true or nil)
     -- Note: This uses Lua's "and/or" idiom which works like a ternary
     
+    -- Helper to trim whitespace
+    local function trim(s)
+        return s:match("^%s*(.-)%s*$")
+    end
+    
     -- Convert interpolation first, then instance vars
-    local condition = self:convert_interpolated_strings(node.condition)
+    local condition = self:convert_interpolated_strings(trim(node.condition))
     condition = self:convert_instance_vars(condition)
     
-    local if_true = self:convert_interpolated_strings(node.if_true)
+    local if_true = self:convert_interpolated_strings(trim(node.if_true))
     if_true = self:convert_instance_vars(if_true)
     
-    local if_false = self:convert_interpolated_strings(node.if_false)
-    if_false = self:convert_instance_vars(if_false)
+    local if_false
+    if node.if_false then
+        if_false = self:convert_interpolated_strings(trim(node.if_false))
+        if_false = self:convert_instance_vars(if_false)
+    else
+        if_false = "nil"
+    end
     
     return "(" .. condition .. " and " .. if_true .. " or " .. if_false .. ")"
 end
@@ -961,6 +982,12 @@ function CodeGen:gen_interpolated(expr)
     end
 end
 
+function CodeGen:convert_operators(expr)
+    -- Convert Ruby-style operators to Lua equivalents
+    -- != becomes ~=
+    return expr:gsub("!=", "~=")
+end
+
 function CodeGen:convert_instance_vars(expr)
     -- convert @variable to self.variable
     -- handle @__name and @super specially
@@ -968,7 +995,10 @@ function CodeGen:convert_instance_vars(expr)
     -- thinking about it, I don't think __name and @super need to be 
     -- handled specially. It should just resolve as long as @var -> self.var
     
-    -- First convert \method to self:method
+    -- First convert operators
+    expr = self:convert_operators(expr)
+    
+    -- Then convert \method to self:method
     expr = expr:gsub("\\([%w_]+)", "self:%1")
     
     -- Then convert @variable to self.variable

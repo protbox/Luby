@@ -92,7 +92,7 @@ end
 
 let n = 7
 
-case n # -> removed
+case n
 when 5..7 # -> if n >= 5 and n <= 5 then
     # n is within range of 5-7
 when < 5 # non partial, exact or ranged expressions are written as-is with the case at the front -> n < 5
@@ -118,7 +118,7 @@ end
 # classes
 # when a class is detected, luby throws in class implementation lua code
 
-class Animal # -> local Animal = class:extend_as("Animal")
+class Animal
     def initialize(type) # -> function Animal:initialize(type)
         @type = type or "Unknown" # -> self.type = type or "Unknown"
     end
@@ -130,7 +130,7 @@ end # end class
 
 # extending from a base class (inheritance)
 # Class < ParentClass
-class Duck < Animal # -> local Duck = Animal:extend_as("Duck")
+class Duck < Animal
     def speak # -> function Duck:speak()
         super(self) # -> Duck.super.speak(self)
         puts "The #{@__name} goes Quack!" # @__name refers to the classes name, ie: Duck
