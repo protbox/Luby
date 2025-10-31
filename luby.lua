@@ -672,8 +672,40 @@ function CodeGen:gen_each_pair(node)
 end
 
 function CodeGen:gen_each(node)
-    local index = node.index or "_"
-    self:emit_line("for " .. index .. ", " .. node.value .. " in ipairs(" .. node.target .. ") do")
+    local target = node.target
+    
+    -- Check if target is a range pattern (e.g., "1..5", "10..1", or "start..end")
+    -- Supports both numeric literals and variables
+    local range_start, range_end = target:match("^%s*([%w_]+)%.%.([%w_]+)%s*$")
+    
+    if range_start and range_end then
+        -- It's a range! Generate a numeric for loop
+        local var = node.value  -- In range context, we only use one variable
+        
+        -- Check if both are numeric literals to determine direction
+        local start_num = tonumber(range_start)
+        local end_num = tonumber(range_end)
+        
+        if start_num and end_num then
+            -- Both are numbers - we can determine direction at transpile time
+            if start_num > end_num then
+                -- Descending range: add step of -1
+                self:emit_line("for " .. var .. " = " .. range_start .. ", " .. range_end .. ", -1 do")
+            else
+                -- Ascending range: default step of 1
+                self:emit_line("for " .. var .. " = " .. range_start .. ", " .. range_end .. " do")
+            end
+        else
+            -- At least one is a variable - need runtime check for direction
+            -- Generate: for var = start, end, (start > end and -1 or 1) do
+            self:emit_line("for " .. var .. " = " .. range_start .. ", " .. range_end .. ", (" .. range_start .. " > " .. range_end .. " and -1 or 1) do")
+        end
+    else
+        -- Regular array iteration with ipairs
+        local index = node.index or "_"
+        self:emit_line("for " .. index .. ", " .. node.value .. " in ipairs(" .. target .. ") do")
+    end
+    
     self:inc_indent()
     for _, stmt in ipairs(node.body) do
         self:gen_node(stmt)
